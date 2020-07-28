@@ -1,0 +1,162 @@
+---
+title: "MachineLearningProject"
+author: "Hichem"
+date: "22/07/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## introduction
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, our goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways
+
+## load the data
+
+```{r }
+train_data <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"))
+test_data <- read.csv("pml-testing.csv")
+dim(train_data)
+```
+## data cleanning :
+we notice that there's 160 columns but after checking each column we notice that some columns has so many null values.
+we will delete the columns that has more than 90% of null values 
+after we will remove the first columns (X , user_name , raw_timestamp_part_1 , raw_timestamp_part_2 , cvtd_timestamp) cause they are not usefull for our model
+in the end of this step we will create a new data set in which we will consider only the variables that can be used as predictors 
+```{r   message=FALSE , warning=FALSE}
+library(dplyr)
+EmptyCol <- which(colSums(is.na(train_data) | train_data == "") > 0.9 * dim(train_data)[1])
+train_data <- train_data[ , -EmptyCol]
+train_data <- train_data[ , -c(1:7)]
+dim(train_data)
+```
+## data exploration
+first we will see how many observation we have for each class
+```{r message=FALSE , warning=FALSE}
+table(train_data$classe)
+```
+there's five classes, which are pretty much balanced
+
+next we will check the correlation between the variables :
+```{r message=FALSE , warning=FALSE}
+library(corrplot)
+corMatrix <- cor(train_data[ , -53])
+corrplot(corMatrix , order = "FPC" , method = "color" , type = "lower" , 
+         tl.cex = 0.8 , tl.col = rgb(0,0,0) , mar = c(1,1,1,1) , title = "Correlation")
+```
+we notice that there's a lot of blue and red boxes which means a strong correlation between the variables.
+Let's check how many pair of variables that have a corelation greater then 0.8
+```{r  message=FALSE , warning=FALSE}
+c <- abs(corMatrix) 
+diag(c) <- 0
+c <- which(c > 0.8 , arr.ind = TRUE)
+c <- dim(c)[1]
+c
+```
+there's a 38 of highly correlated variables, we may consider not including some of them but we may also consider reducing the dimentionality of the data-set using principal component analysis
+### data spliting :
+but first we will split our data-set into train and validation data-sets
+```{r message=FALSE , warning=FALSE}
+library(dplyr)
+library(caret)
+
+train_index <- createDataPartition(train_data$classe , p = 0.65 , list = FALSE)
+train <- train_data[train_index , ]
+validation <- train_data[-train_index , ]
+dim(train)
+```
+### dimentionamity reduction :
+now we will use pca to reduce the dimentionality of our data-set
+``` {r message=FALSE , warning=FALSE}
+library(dummies)
+
+trainDummy <- dummy.data.frame(train[ ,-53], sep = ".")
+
+pca <-prcomp(trainDummy)
+pc_var <- (pca$sdev^2)/sum(pca$sdev^2)
+pc_var_com <- cumsum(pc_var)
+pc_var_com
+```
+we notice that we still have more than 96% of the variation using only 10 columns.
+which helps to tremendously reduce the data-set dimentionality (from 53 column to 10),
+saving memory space and reducing the computation time 
+now we will create our new train and validation data-sets
+``` {r message=FALSE , warning=FALSE}
+plot(pc_var_com, xlab = "Principal Component", ylab = "Proportion of Variance Explained", type = "b")
+library(dplyr)
+train_pca <- data.frame(pca$x) %>% select(PC1:PC10)
+valdation_pca <- data.frame(predict(pca , dummy.data.frame(validation[,-53], sep = "."))) %>% select(PC1:PC10) 
+```
+
+before we start fitting the models, we may also want to preprocess the testing data, so we will remove the unnecessary columns and reduce the dimensionality using the pca model
+```{r message=FALSE , warning=FALSE}
+colnames <- colnames(train_data[ , -53])
+test_pca <- data.frame(predict(pca , dummy.data.frame(test_data[ , colnames], sep = "."))) %>% select(PC1:PC10) 
+```
+
+now that we have our train, validatio and test data ready we will start fitting the models
+## fitting the models :
+now we will fit some models using a verity of ML algorithms (random forest , decision tree, gbm )
+but first let's load some libraries and prepare the train.control object 
+so we will be using the parallel an doParallel libraries to improve the computation time by pralallizing the calculation on the computer thread, this technique helped a lot in reducing the trainning time
+and we will use 4-fold cross validation 
+```{r message=FALSE , warning=FALSE}
+library(parallel)
+library(doParallel)
+train_pca$classe <- factor(train$classe)
+train.control <- trainControl(method = "cv", number = 4 , allowParallel = TRUE)
+```
+
+so let's start by fitting a random forest classifier 
+```{r message=FALSE , warning=FALSE}
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+
+rf_model <- train(classe ~ . , data = train_pca , method = "rf" , na.action = na.pass , trControl = train.control)
+stopCluster(cluster)
+registerDoSEQ()
+plot(rf_model , main = "RF classifier accuracy by number of predictors")
+```
+now we will check the performance of the model 
+```{r message=FALSE , warning=FALSE}
+rf_model
+print("***************confusion Matrix ****************")
+confusionMatrix(factor(validation$classe) ,predict(rf_model ,newdata =  valdation_pca))
+```
+now let's fit a decision tree model  
+
+```{r message=FALSE , warning=FALSE}
+dt_model <- train(classe ~ . , data = train_pca , method = "rpart"  , na.action = na.pass)
+dt_model
+print("***************confusion Matrix ****************")
+confusionMatrix(factor(validation$classe) ,predict(dt_model ,newdata =  valdation_pca))
+```
+
+the last classifier that we are gonna fit is the gbm classifier, and we  will use the parallel computation to  speed up the trainning process
+
+```{r message=FALSE , warning=FALSE}
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+
+gbm_model <- train(classe ~ . , data = train_pca , method = "gbm"  , na.action = na.pass , verbos = FALSE , trControl = train.control)
+stopCluster(cluster)
+registerDoSEQ()
+plot(gbm_model , main= "model performance bu number of trees")
+```
+
+let's check the performance of our final model
+```{r message=FALSE , warning=FALSE}
+
+gbm_model
+print("***************confusion Matrix ****************")
+confusionMatrix(factor(validation$classe) ,predict(gbm_model ,newdata =  valdation_pca))
+
+```
+## model selection : 
+
+after fitig all this models we can say that the best model that give the best accuracy score is the random forest classifier 
+so we will use it as our final model to predict the class for the testing dataset 
+```{r message=FALSE , warning=FALSE}
+test_prediction <- predict(rf_model , newdata = test_pca)
+```
